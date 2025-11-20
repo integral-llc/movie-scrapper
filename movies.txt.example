@@ -1,0 +1,11 @@
+# Movie Scrapper - Folder Configuration
+# Add one movie folder path per line
+# Lines starting with # are comments and will be ignored
+
+# Example paths (update these to your actual movie directories):
+# /Users/username/Movies
+# /Volumes/External/Movies
+# /mnt/nas/media/movies
+
+# You can add as many folders as needed
+# The scanner will recursively search all subdirectories
