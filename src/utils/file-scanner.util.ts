@@ -89,8 +89,10 @@ export class FileScanner {
       // Check if folder contains multiple video files with episode numbering
       if (videoFiles.length < 2) return false;
 
-      // Check if files have episode patterns (e.g., "01. Title", "S01E01")
-      const episodePattern = /^(\d{1,2})[.\s-]+|s\d{1,2}[.\s]?e\d{1,2}/i;
+      // Check if files have episode patterns:
+      // - English: "01. Title", "S01E01", "Episode 1"
+      // - Russian: "Title 01 сер", "серия 01", "сер. 01"
+      const episodePattern = /^(\d{1,2})[.\s-]+|s\d{1,2}[.\s]?e\d{1,2}|\d{1,2}\s*сер|\bсерия\s*\d+|\bсер\.?\s*\d+/i;
       const episodeFiles = videoFiles.filter((f) => episodePattern.test(f.name));
 
       // If less than 50% have episode patterns, not a TV series

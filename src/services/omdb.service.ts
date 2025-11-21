@@ -1,13 +1,12 @@
 import axios from 'axios';
-import { config } from '../config/env.config';
+import { getConfig } from '../config/env.config';
 import { IMDBMovieData } from '../types/movie.types';
 
 export class OMDBService {
   private readonly baseUrl = 'http://www.omdbapi.com/';
-  private readonly apiKey: string;
 
-  constructor() {
-    this.apiKey = config.omdbApiKey;
+  private get apiKey(): string {
+    return getConfig().omdbApiKey;
   }
 
   async searchMovie(title: string, year?: number): Promise<IMDBMovieData | null> {

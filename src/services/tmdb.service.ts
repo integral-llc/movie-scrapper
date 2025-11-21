@@ -1,8 +1,8 @@
 import axios from 'axios';
+import { getConfig } from '../config/env.config';
 
 // TMDb API - FREE and MUCH better for international titles
 // Get API key from: https://www.themoviedb.org/settings/api
-// For now using a public read access token (bearer token method)
 
 interface TMDbMovie {
   id: number;
@@ -57,8 +57,10 @@ export interface MovieData {
 
 export class TMDbService {
   private readonly baseUrl = 'https://api.themoviedb.org/3';
-  // Get your free API key from: https://www.themoviedb.org/settings/api
-  private readonly apiKey = process.env.TMDB_API_KEY || '8d6d91941230817f7807d643736e8a49';
+
+  private get apiKey(): string {
+    return getConfig().tmdbApiKey;
+  }
 
   async searchMovie(title: string, year?: number): Promise<MovieData | null> {
     try {
