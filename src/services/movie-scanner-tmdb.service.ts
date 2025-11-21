@@ -87,26 +87,47 @@ export class MovieScannerTMDbService {
     const existingMovie = this.movieRepo.findByPath(fileInfo.fullPath);
 
     if (existingMovie && existingMovie.status === 'active') {
-      // Check if poster needs to be regenerated
-      if (!existingMovie.posterUrl || existingMovie.posterUrl === 'N/A') {
-        console.log(`\nRegenerating poster for: ${existingMovie.fileName}`);
-        // Search TMDb again to get poster URL
-        const { cleanName, year } = this.nameParser.cleanMovieName(existingMovie.fileName);
-        const movieData = await this.tmdbService.searchMovie(cleanName, year);
+      const directory = path.dirname(fileInfo.fullPath);
+      const extension = path.extname(fileInfo.fullPath);
+      const baseFileName = existingMovie.fileName.replace(extension, '');
+      const posterPath = path.join(directory, `${baseFileName}-poster.jpg`);
+      const nfoPath = path.join(directory, `${baseFileName}.nfo`);
 
-        if (movieData && movieData.posterUrl) {
-          const directory = path.dirname(fileInfo.fullPath);
-          const extension = path.extname(fileInfo.fullPath);
-          const baseFileName = existingMovie.fileName.replace(extension, '');
-          const posterPath = path.join(directory, `${baseFileName}-poster.jpg`);
+      // Check if poster or NFO file is missing on disk
+      const posterMissing = !fs.existsSync(posterPath);
+      const nfoMissing = !fs.existsSync(nfoPath);
+      const needsPosterUrl = !existingMovie.posterUrl || existingMovie.posterUrl === 'N/A';
 
+      if (posterMissing || nfoMissing || needsPosterUrl) {
+        console.log(`\nRegenerating metadata for: ${existingMovie.fileName}`);
+        if (posterMissing) console.log(`  - Poster file missing: ${posterPath}`);
+        if (nfoMissing) console.log(`  - NFO file missing: ${nfoPath}`);
+
+        // Search TMDb to get poster URL if needed
+        if (needsPosterUrl || posterMissing) {
+          const { cleanName, year } = this.nameParser.cleanMovieName(existingMovie.fileName);
+          const movieData = await this.tmdbService.searchMovie(cleanName, year);
+
+          if (movieData && movieData.posterUrl) {
+            await this.posterService.downloadAndWatermarkPoster(
+              movieData.posterUrl,
+              posterPath,
+              existingMovie.imdbRating
+            );
+            existingMovie.posterUrl = movieData.posterUrl;
+          }
+        } else if (posterMissing && existingMovie.posterUrl) {
+          // We have URL in DB but file is missing - redownload
           await this.posterService.downloadAndWatermarkPoster(
-            movieData.posterUrl,
+            existingMovie.posterUrl,
             posterPath,
             existingMovie.imdbRating
           );
+        }
 
-          existingMovie.posterUrl = movieData.posterUrl;
+        // Regenerate NFO if missing
+        if (nfoMissing) {
+          await this.kodiService.createNFOFile(existingMovie, directory);
         }
       }
 
@@ -171,7 +192,11 @@ export class MovieScannerTMDbService {
 
     let movieData = null;
 
-    if (imdbResult && imdbResult.rating > 0) {
+    // Validate IMDB result matches search title before accepting
+    const imdbTitleMatches = imdbResult && imdbResult.rating > 0 &&
+      this.isTitleMatch(cleanName, imdbResult.title);
+
+    if (imdbResult && imdbResult.rating > 0 && imdbTitleMatches) {
       // Found on IMDB - use TMDb to get additional metadata
       console.log(`  ✓ IMDB found: ${imdbResult.title} (${imdbResult.year}) - Rating ${imdbResult.rating}`);
       const tmdbData = await this.tmdbService.searchMovie(imdbResult.title, imdbResult.year);
@@ -209,8 +234,12 @@ export class MovieScannerTMDbService {
         };
       }
     } else {
-      // IMDB search failed, fall back to TMDb
-      console.log(`  IMDB search failed, trying TMDb...`);
+      // IMDB search failed or returned wrong movie, fall back to TMDb
+      if (imdbResult && imdbResult.rating > 0 && !imdbTitleMatches) {
+        console.log(`  IMDB returned wrong movie: "${imdbResult.title}" - trying TMDb directly...`);
+      } else {
+        console.log(`  IMDB search failed, trying TMDb...`);
+      }
       movieData = await this.tmdbService.searchMovie(cleanName, year);
     }
 
@@ -565,6 +594,7 @@ export class MovieScannerTMDbService {
    * Check if two movie titles are a reasonable match
    * Handles minor variations like "The Baker" vs "Baker, The"
    * But rejects different movies like "The Baker" vs "Christmas at the Amish Bakery"
+   * or "What If" vs "What If: Aka Laow"
    */
   private isTitleMatch(title1: string, title2: string): boolean {
     const normalize = (t: string) => t
@@ -580,16 +610,46 @@ export class MovieScannerTMDbService {
     // Exact match after normalization
     if (n1 === n2) return true;
 
-    // For short titles (1-2 words), require exact match after normalization
+    // Check if one title is the other with a subtitle (e.g., "Dune" vs "Dune Part One")
+    // Remove common subtitle patterns and compare again
+    const removeSubtitle = (t: string) => t
+      .replace(/\s+part\s+(one|two|three|four|1|2|3|4|i+)$/i, '')
+      .replace(/\s+chapter\s+\d+$/i, '')
+      .replace(/\s+episode\s+\d+$/i, '')
+      .trim();
+
+    const ns1 = removeSubtitle(n1);
+    const ns2 = removeSubtitle(n2);
+
+    if (ns1 === ns2) return true;
+
+    // For short titles (1-2 words), be very strict
     const words1 = n1.split(/\s+/).filter(w => w.length > 1);
     const words2 = n2.split(/\s+/).filter(w => w.length > 1);
 
     if (words1.length <= 2 || words2.length <= 2) {
-      // Short titles - one must be equal to or contain the other exactly
+      // Only allow short titles to match if:
+      // 1. Exact match (already checked above)
+      // 2. One is a single alphanumeric word that starts the other (e.g., "F9" -> "F9 The Fast Saga")
+
+      // Single-word titles can match if they're the start of a longer title
+      // But multi-word short titles need exact match to prevent "What If" matching "What If: Aka Laow"
+      if (words1.length === 1 && words2.length > 1) {
+        // title1 is single word, check if it's the first word of title2
+        const firstWord2 = words2[0];
+        if (n1 === firstWord2) return true;
+      }
+      if (words2.length === 1 && words1.length > 1) {
+        // title2 is single word, check if it's the first word of title1
+        const firstWord1 = words1[0];
+        if (n2 === firstWord1) return true;
+      }
+
+      // For 2-word titles, require exact match - no fuzzy matching
       return n1 === n2;
     }
 
-    // For longer titles, check if one is a prefix/suffix of the other
+    // For longer titles (3+ words), check if one is a prefix of the other
     // This handles cases like "The Baker" vs "The Baker: A Story"
     if (n1.startsWith(n2) || n2.startsWith(n1)) return true;
 

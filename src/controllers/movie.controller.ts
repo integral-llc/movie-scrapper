@@ -90,6 +90,20 @@ export class MovieController {
     }
   };
 
+  retryErrors = async (req: Request, res: Response): Promise<void> => {
+    try {
+      console.log('Retry errors triggered via API');
+
+      res.json({ success: true, message: 'Retry errors task started' });
+
+      this.taskRunner.executeTask('RetryErrorsTask').catch((error) => {
+        console.error('Retry errors failed:', error);
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, error: 'Failed to trigger retry errors' });
+    }
+  };
+
   cleanupDuplicates = async (req: Request, res: Response): Promise<void> => {
     try {
       console.log('Cleanup duplicates triggered via API');

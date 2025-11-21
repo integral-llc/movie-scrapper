@@ -10,6 +10,7 @@ interface TMDbMovie {
   original_title: string;
   release_date: string;
   vote_average: number;
+  vote_count: number;
   overview: string;
   poster_path: string | null;
   backdrop_path: string | null;
@@ -66,7 +67,8 @@ export class TMDbService {
     try {
       console.log(`🎬 TMDb search: "${title}"${year ? ` (${year})` : ''}`);
 
-      // Search for movie
+      // Search for movie - start WITHOUT year filter to get most popular results
+      // Then use findBestMatch to filter by year
       const searchUrl = `${this.baseUrl}/search/movie`;
       const searchParams: any = {
         api_key: this.apiKey,
@@ -75,36 +77,21 @@ export class TMDbService {
         include_adult: false,
       };
 
-      if (year) {
-        searchParams.year = year;
-        searchParams.primary_release_year = year;
-      }
-
+      // First search: no year filter to get all popular results
       const searchResponse = await axios.get<TMDbSearchResponse>(searchUrl, {
         params: searchParams,
         timeout: 10000,
       });
 
-      if (!searchResponse.data.results || searchResponse.data.results.length === 0) {
-        // Try without year
-        if (year) {
-          console.log(`  No results with year, trying without...`);
-          delete searchParams.year;
-          delete searchParams.primary_release_year;
-          const retryResponse = await axios.get<TMDbSearchResponse>(searchUrl, {
-            params: searchParams,
-            timeout: 10000,
-          });
-          if (retryResponse.data.results.length > 0) {
-            return await this.getMovieDetails(retryResponse.data.results[0].id);
-          }
-        }
+      let results = searchResponse.data.results || [];
+
+      if (results.length === 0) {
         console.log(`  ✗ No results found`);
         return null;
       }
 
       // Get best match
-      const bestMatch = this.findBestMatch(searchResponse.data.results, title, year);
+      const bestMatch = this.findBestMatch(results, title, year);
       if (!bestMatch) {
         console.log(`  ✗ No good match found`);
         return null;
@@ -123,24 +110,87 @@ export class TMDbService {
   private findBestMatch(results: TMDbMovie[], searchTitle: string, searchYear?: number): TMDbMovie | null {
     if (results.length === 0) return null;
 
-    // Sort by popularity and vote_average
-    const sorted = results.sort((a, b) => {
-      const aScore = a.popularity * 0.7 + a.vote_average * 0.3;
-      const bScore = b.popularity * 0.7 + b.vote_average * 0.3;
-      return bScore - aScore;
+    const normalizeTitle = (t: string) => t
+      .toLowerCase()
+      .replace(/^the\s+/i, '')
+      .replace(/,\s*the$/i, '')
+      .replace(/[^\w\s]/g, '')
+      .trim();
+
+    const normalizedSearch = normalizeTitle(searchTitle);
+
+    // First, look for exact title matches only
+    const exactMatches = results.filter((m) => {
+      const n1 = normalizeTitle(m.title);
+      const n2 = normalizeTitle(m.original_title);
+      return n1 === normalizedSearch || n2 === normalizedSearch;
     });
 
-    // If year provided, prefer exact year match
-    if (searchYear) {
-      const exactYearMatch = sorted.find((m) => {
-        const movieYear = m.release_date ? parseInt(m.release_date.substring(0, 4)) : 0;
-        return movieYear === searchYear;
+    // If we have exact matches, use those; otherwise fall back to partial matches
+    let candidates: TMDbMovie[];
+    if (exactMatches.length > 0) {
+      candidates = exactMatches;
+    } else {
+      // Look for close title matches (prefix/suffix)
+      const partialMatches = results.filter((m) => {
+        const n1 = normalizeTitle(m.title);
+        const n2 = normalizeTitle(m.original_title);
+        return n1.startsWith(normalizedSearch + ' ') || n2.startsWith(normalizedSearch + ' ') ||
+               normalizedSearch.startsWith(n1 + ' ') || normalizedSearch.startsWith(n2 + ' ');
       });
-      if (exactYearMatch) return exactYearMatch;
+      candidates = partialMatches.length > 0 ? partialMatches : results;
     }
 
-    // Return most popular
-    return sorted[0];
+    // Filter by year if provided (within 1 year tolerance)
+    if (searchYear) {
+      const yearMatches = candidates.filter((m) => {
+        const movieYear = m.release_date ? parseInt(m.release_date.substring(0, 4)) : 0;
+        return Math.abs(movieYear - searchYear) <= 1;
+      });
+      if (yearMatches.length > 0) {
+        candidates = yearMatches;
+      }
+    }
+
+    // Score and sort candidates - prioritize:
+    // 1. English language films (most file names are in English)
+    // 2. Vote count (indicates more well-known films)
+    // 3. Popularity
+    // 4. Vote average
+    const scored = candidates.map((m) => {
+      let score = 0;
+
+      // English language bonus (significant boost)
+      if (m.original_language === 'en') {
+        score += 1000;
+      }
+
+      // Vote count is most important indicator of well-known films
+      // Use log scale to prevent extremely popular films from dominating
+      const voteCountScore = Math.log10(Math.max(m.vote_count || 1, 1)) * 100;
+      score += voteCountScore;
+
+      // Popularity adds to score
+      score += m.popularity * 0.5;
+
+      // Vote average adds a small bonus
+      score += m.vote_average * 5;
+
+      return { movie: m, score };
+    });
+
+    scored.sort((a, b) => b.score - a.score);
+
+    // Log top candidates for debugging
+    if (scored.length > 1) {
+      console.log(`  TMDb candidates for "${searchTitle}":`);
+      scored.slice(0, 3).forEach((s, i) => {
+        const year = s.movie.release_date?.substring(0, 4) || '????';
+        console.log(`    ${i + 1}. "${s.movie.title}" (${year}) [${s.movie.original_language}] votes:${s.movie.vote_count || 0} pop:${s.movie.popularity?.toFixed(1)} score:${s.score.toFixed(0)}`);
+      });
+    }
+
+    return scored[0]?.movie || null;
   }
 
   private async getMovieDetails(tmdbId: number): Promise<MovieData | null> {
