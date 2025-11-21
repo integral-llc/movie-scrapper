@@ -9,7 +9,7 @@ import { FileScanner } from '../utils/file-scanner.util';
 import { MovieNameParser } from '../utils/movie-name-parser.util';
 import { Movie, MovieFileInfo, ScanResult } from '../types/movie.types';
 import { CYRILLIC_COUNTRIES, ROMANIAN_COUNTRIES } from '../config/constants';
-import { config } from '../config/env.config';
+import { getConfig } from '../config/env.config';
 
 export class MovieScannerService {
   private movieRepo: MovieRepository;
@@ -209,12 +209,13 @@ export class MovieScannerService {
   }
 
   private readMovieFolders(): string[] {
-    if (!fs.existsSync(config.moviesTxtPath)) {
-      console.warn(`movies.txt not found at: ${config.moviesTxtPath}`);
+    const moviesTxtPath = getConfig().moviesTxtPath;
+    if (!fs.existsSync(moviesTxtPath)) {
+      console.warn(`movies.txt not found at: ${moviesTxtPath}`);
       return [];
     }
 
-    const content = fs.readFileSync(config.moviesTxtPath, 'utf-8');
+    const content = fs.readFileSync(moviesTxtPath, 'utf-8');
     return content
       .split('\n')
       .map((line) => line.trim())

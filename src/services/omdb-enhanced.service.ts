@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { config } from '../config/env.config';
+import { getConfig } from '../config/env.config';
 import { IMDBMovieData } from '../types/movie.types';
 import { compareTwoStrings } from 'string-similarity';
 
@@ -19,11 +19,10 @@ interface SearchResponse {
 
 export class OMDBEnhancedService {
   private readonly baseUrl = 'http://www.omdbapi.com/';
-  private readonly apiKey: string;
   private readonly minSimilarity = 0.6; // 60% similarity threshold
 
-  constructor() {
-    this.apiKey = config.omdbApiKey;
+  private get apiKey(): string {
+    return getConfig().omdbApiKey;
   }
 
   /**

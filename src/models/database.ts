@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { config } from '../config/env.config';
+import { getConfig } from '../config/env.config';
 import fs from 'fs';
 import path from 'path';
 
@@ -10,6 +10,7 @@ export class DatabaseConnection {
 
   public static getInstance(): Database.Database {
     if (!DatabaseConnection.instance) {
+      const config = getConfig();
       const dbDir = path.dirname(config.databasePath);
 
       if (!fs.existsSync(dbDir)) {

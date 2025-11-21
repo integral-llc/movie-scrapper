@@ -54,8 +54,14 @@ export class MovieRepository {
       if (key !== 'id') {
         const snakeKey = key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
         fields.push(`${snakeKey} = ?`);
-        // Convert undefined to null for SQLite
-        values.push(value === undefined ? null : value);
+        // Convert undefined to null and booleans to 0/1 for SQLite
+        if (value === undefined) {
+          values.push(null);
+        } else if (typeof value === 'boolean') {
+          values.push(value ? 1 : 0);
+        } else {
+          values.push(value);
+        }
       }
     });
 

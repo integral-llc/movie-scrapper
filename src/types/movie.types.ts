@@ -10,15 +10,15 @@ export interface Movie {
   imdbId: string;
   country: string;
   language: string;
-  plot?: string;
-  genre?: string;
-  director?: string;
-  actors?: string;
-  posterUrl?: string;
+  plot?: string | null;
+  genre?: string | null;
+  director?: string | null;
+  actors?: string | null;
+  posterUrl?: string | null;
   isFolder: boolean;
   lastScanned: string;
   status: 'active' | 'deleted' | 'error';
-  errorMessage?: string;
+  errorMessage?: string | null;
   createdAt: string;
   updatedAt: string;
 }

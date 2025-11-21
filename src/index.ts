@@ -1,6 +1,6 @@
 import express, { Request, Response } from 'express';
 import cors from 'cors';
-import { config } from './config/env.config';
+import { initConfig, getConfig } from './config/env.config';
 import { TaskRunner } from './tasks/task-runner';
 import { MovieScanTask } from './tasks/movie-scan.task';
 import { RetryErrorsTask } from './tasks/retry-errors.task';
@@ -14,43 +14,50 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const taskRunner = new TaskRunner();
-taskRunner.registerTask(new MovieScanTask());
-taskRunner.registerTask(new RetryErrorsTask());
+// Initialize config asynchronously before starting the server
+async function bootstrap() {
+  // Load secrets from AWS Secrets Manager (or local .env fallback)
+  await initConfig();
+  const config = getConfig();
 
-const scheduler = new Scheduler(taskRunner);
-scheduler.scheduleMovieScan();
+  const taskRunner = new TaskRunner();
+  taskRunner.registerTask(new MovieScanTask());
+  taskRunner.registerTask(new RetryErrorsTask());
 
-const movieController = new MovieController(taskRunner);
-const thumbnailController = new ThumbnailController();
+  const scheduler = new Scheduler(taskRunner);
+  scheduler.scheduleMovieScan();
 
-app.get('/', (req: Request, res: Response) => {
-  res.json({
-    name: 'Movie Scrapper API',
-    version: '1.0.0',
-    endpoints: {
-      'GET /': 'API information',
-      'GET /movies': 'Movie library web UI',
-      'GET /movies/api/list': 'Get all movies (query: ?status=active|deleted|error)',
-      'GET /movies/api/details/:id': 'Get movie by ID',
-      'GET /movies/api/stats': 'Get statistics',
-      'GET /movies/api/thumbnails/:id': 'Get movie poster thumbnail',
-      'POST /movies/api/scan': 'Trigger manual scan',
-      'POST /movies/api/retry-errors': 'Retry all error movies with enhanced search',
-      'GET /movies/api/tasks': 'Get registered tasks',
-    },
+  const movieController = new MovieController(taskRunner);
+  const thumbnailController = new ThumbnailController();
+
+  app.get('/', (_req: Request, res: Response) => {
+    res.json({
+      name: 'Movie Scrapper API',
+      version: '1.0.0',
+      endpoints: {
+        'GET /': 'API information',
+        'GET /movies': 'Movie library web UI',
+        'GET /movies/api/list': 'Get all movies (query: ?status=active|deleted|error)',
+        'GET /movies/api/details/:id': 'Get movie by ID',
+        'GET /movies/api/stats': 'Get statistics',
+        'GET /movies/api/thumbnails/:id': 'Get movie poster thumbnail',
+        'POST /movies/api/scan': 'Trigger manual scan',
+        'POST /movies/api/cleanup-duplicates': 'Clean up duplicate NFO/poster files',
+        'POST /movies/api/retry-errors': 'Retry all error movies with enhanced search',
+        'GET /movies/api/tasks': 'Get registered tasks',
+      },
+    });
   });
-});
 
-// Movie service - all endpoints under /movies
-app.get('/movies/api/list', movieController.getAllMovies);
-app.get('/movies/api/details/:id', movieController.getMovieById);
-app.get('/movies/api/stats', movieController.getStats);
-app.get('/movies/api/thumbnails/:id', thumbnailController.getThumbnail);
-app.post('/movies/api/scan', movieController.triggerScan);
+  // Movie service - all endpoints under /movies
+  app.get('/movies/api/list', movieController.getAllMovies);
+  app.get('/movies/api/details/:id', movieController.getMovieById);
+  app.get('/movies/api/stats', movieController.getStats);
+  app.get('/movies/api/thumbnails/:id', thumbnailController.getThumbnail);
+  app.post('/movies/api/scan', movieController.triggerScan);
 
-app.get('/movies', (req: Request, res: Response) => {
-  res.send(`
+  app.get('/movies', (_req: Request, res: Response) => {
+    res.send(`
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -191,52 +198,61 @@ app.get('/movies', (req: Request, res: Response) => {
   </script>
 </body>
 </html>
-  `);
-});
-
-app.post('/movies/api/retry-errors', async (req: Request, res: Response) => {
-  try {
-    console.log('Retry errors triggered via API');
-    res.json({ success: true, message: 'Retry started' });
-
-    taskRunner.executeTask('RetryErrorsTask').catch((error) => {
-      console.error('Retry failed:', error);
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, error: 'Failed to trigger retry' });
-  }
-});
-
-app.get('/movies/api/tasks', (req: Request, res: Response) => {
-  const tasks = taskRunner.getRegisteredTasks();
-  res.json({ success: true, tasks });
-});
-
-app.get('/health', (req: Request, res: Response) => {
-  res.json({ success: true, status: 'healthy', timestamp: new Date().toISOString() });
-});
-
-DatabaseConnection.getInstance();
-
-const server = app.listen(config.port, () => {
-  console.log('='.repeat(50));
-  console.log('Movie Scrapper Server');
-  console.log('='.repeat(50));
-  console.log(`Server running on port: ${config.port}`);
-  console.log(`API URL: http://localhost:${config.port}`);
-  console.log(`Scan schedule: ${config.scanCronSchedule} (every 12 hours)`);
-  console.log('='.repeat(50));
-});
-
-const gracefulShutdown = () => {
-  console.log('\nShutting down gracefully...');
-  scheduler.stopAll();
-  DatabaseConnection.close();
-  server.close(() => {
-    console.log('Server closed');
-    process.exit(0);
+    `);
   });
-};
 
-process.on('SIGTERM', gracefulShutdown);
-process.on('SIGINT', gracefulShutdown);
+  app.post('/movies/api/cleanup-duplicates', movieController.cleanupDuplicates);
+
+  app.post('/movies/api/retry-errors', async (_req: Request, res: Response) => {
+    try {
+      console.log('Retry errors triggered via API');
+      res.json({ success: true, message: 'Retry started' });
+
+      taskRunner.executeTask('RetryErrorsTask').catch((error) => {
+        console.error('Retry failed:', error);
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, error: 'Failed to trigger retry' });
+    }
+  });
+
+  app.get('/movies/api/tasks', (_req: Request, res: Response) => {
+    const tasks = taskRunner.getRegisteredTasks();
+    res.json({ success: true, tasks });
+  });
+
+  app.get('/health', (_req: Request, res: Response) => {
+    res.json({ success: true, status: 'healthy', timestamp: new Date().toISOString() });
+  });
+
+  DatabaseConnection.getInstance();
+
+  const server = app.listen(config.port, () => {
+    console.log('='.repeat(50));
+    console.log('Movie Scrapper Server');
+    console.log('='.repeat(50));
+    console.log(`Server running on port: ${config.port}`);
+    console.log(`API URL: http://localhost:${config.port}`);
+    console.log(`Scan schedule: ${config.scanCronSchedule} (every 12 hours)`);
+    console.log('='.repeat(50));
+  });
+
+  const gracefulShutdown = () => {
+    console.log('\nShutting down gracefully...');
+    scheduler.stopAll();
+    DatabaseConnection.close();
+    server.close(() => {
+      console.log('Server closed');
+      process.exit(0);
+    });
+  };
+
+  process.on('SIGTERM', gracefulShutdown);
+  process.on('SIGINT', gracefulShutdown);
+}
+
+// Start the application
+bootstrap().catch((error) => {
+  console.error('Failed to start application:', error);
+  process.exit(1);
+});

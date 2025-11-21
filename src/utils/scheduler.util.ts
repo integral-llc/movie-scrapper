@@ -1,5 +1,5 @@
 import * as cron from 'node-cron';
-import { config } from '../config/env.config';
+import { getConfig } from '../config/env.config';
 import { TaskRunner } from '../tasks/task-runner';
 
 export class Scheduler {
@@ -29,7 +29,7 @@ export class Scheduler {
   }
 
   scheduleMovieScan(): void {
-    this.scheduleTask('MovieScanTask', config.scanCronSchedule);
+    this.scheduleTask('MovieScanTask', getConfig().scanCronSchedule);
   }
 
   stopTask(taskName: string): void {

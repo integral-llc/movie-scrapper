@@ -1,17 +1,21 @@
 import { TranslateClient, TranslateTextCommand } from '@aws-sdk/client-translate';
-import { config } from '../config/env.config';
+import { getConfig } from '../config/env.config';
 
 export class TranslateService {
-  private client: TranslateClient;
+  private client: TranslateClient | null = null;
 
-  constructor() {
-    this.client = new TranslateClient({
-      region: config.awsRegion,
-      credentials: {
-        accessKeyId: config.awsAccessKeyId,
-        secretAccessKey: config.awsSecretAccessKey,
-      },
-    });
+  private getClient(): TranslateClient {
+    if (!this.client) {
+      const config = getConfig();
+      this.client = new TranslateClient({
+        region: config.awsRegion,
+        credentials: {
+          accessKeyId: config.awsAccessKeyId,
+          secretAccessKey: config.awsSecretAccessKey,
+        },
+      });
+    }
+    return this.client;
   }
 
   async translateToEnglish(text: string, sourceLanguage: string = 'auto'): Promise<string> {
@@ -22,7 +26,7 @@ export class TranslateService {
         TargetLanguageCode: 'en',
       });
 
-      const response = await this.client.send(command);
+      const response = await this.getClient().send(command);
       return response.TranslatedText || text;
     } catch (error) {
       console.error('Translation error:', error);
@@ -38,7 +42,7 @@ export class TranslateService {
         TargetLanguageCode: 'ru',
       });
 
-      const response = await this.client.send(command);
+      const response = await this.getClient().send(command);
       return response.TranslatedText || text;
     } catch (error) {
       console.error('Translation to Russian error:', error);
@@ -54,7 +58,7 @@ export class TranslateService {
         TargetLanguageCode: 'ro',
       });
 
-      const response = await this.client.send(command);
+      const response = await this.getClient().send(command);
       return response.TranslatedText || text;
     } catch (error) {
       console.error('Translation to Romanian error:', error);

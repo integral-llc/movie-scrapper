@@ -1,14 +1,19 @@
 import { Request, Response } from 'express';
+import fs from 'fs';
 import { MovieRepository } from '../repositories/movie.repository';
 import { TaskRunner } from '../tasks/task-runner';
+import { FileRenamerService } from '../services/file-renamer.service';
+import { getConfig } from '../config/env.config';
 
 export class MovieController {
   private movieRepo: MovieRepository;
   private taskRunner: TaskRunner;
+  private fileRenamer: FileRenamerService;
 
   constructor(taskRunner: TaskRunner) {
     this.movieRepo = new MovieRepository();
     this.taskRunner = taskRunner;
+    this.fileRenamer = new FileRenamerService();
   }
 
   getAllMovies = async (req: Request, res: Response): Promise<void> => {
@@ -82,6 +87,61 @@ export class MovieController {
       });
     } catch (error) {
       res.status(500).json({ success: false, error: 'Failed to fetch stats' });
+    }
+  };
+
+  retryErrors = async (req: Request, res: Response): Promise<void> => {
+    try {
+      console.log('Retry errors triggered via API');
+
+      res.json({ success: true, message: 'Retry errors task started' });
+
+      this.taskRunner.executeTask('RetryErrorsTask').catch((error) => {
+        console.error('Retry errors failed:', error);
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, error: 'Failed to trigger retry errors' });
+    }
+  };
+
+  cleanupDuplicates = async (req: Request, res: Response): Promise<void> => {
+    try {
+      console.log('Cleanup duplicates triggered via API');
+
+      // Read movie folders from movies.txt
+      const moviesTxtPath = getConfig().moviesTxtPath;
+      if (!fs.existsSync(moviesTxtPath)) {
+        res.status(400).json({ success: false, error: 'movies.txt not found' });
+        return;
+      }
+
+      const content = fs.readFileSync(moviesTxtPath, 'utf-8');
+      const folders = content
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line && !line.startsWith('#'));
+
+      let totalCleaned = 0;
+      let totalKept = 0;
+
+      for (const folder of folders) {
+        if (fs.existsSync(folder)) {
+          console.log(`Cleaning duplicates in: ${folder}`);
+          const result = this.fileRenamer.cleanupAllDuplicateMetadata(folder);
+          totalCleaned += result.cleaned;
+          totalKept += result.kept;
+        }
+      }
+
+      res.json({
+        success: true,
+        message: `Cleanup completed: ${totalCleaned} duplicate files removed, ${totalKept} files kept`,
+        cleaned: totalCleaned,
+        kept: totalKept,
+      });
+    } catch (error) {
+      console.error('Cleanup failed:', error);
+      res.status(500).json({ success: false, error: 'Failed to cleanup duplicates' });
     }
   };
 }
