@@ -1,0 +1,34 @@
+Create a NodeJS +TypeScript using Express web-server with a scheduler to run various tasks.
+
+Task1
+Parse a given folder, read it from movies.txt for all files, recursivelly for move files.
+Find movie files by popular file extentions. 
+Movie names can be written in any common language. 
+They need to be translated to English correctly by their original name from IMDB.
+You can use OpenAI or recomend another translation engine. 
+After the movie is 100% detected, it file name must be in format 
+Full Movie Name (YEAR) (IMDB XX).ext - i.e. The Ninth Gate (1999) (IMDB 4.6).mkv
+Fir parsed movie keep a local SQLite database.
+Movies can be deleted or added o er time, DB must be always in Sync. 
+The task shall be executed every 12 hours or via a call to the web-server.
+If the movie country of origin Russia or Romania, write the name file name in russian or romanian.
+Everything else must be in English.
+
+
+The system must be easily extendable to add other tasks.
+
+
+Use DRY, SOLID and Ganf of Four Patterns at a primcipal developer level.
+
+If something is unclear, ask, do not guess.
+
+1. use anything that is free and reliable. let me know where I shall get the API key if needed
+2. one folder name per line. it doesn't exists yet. 
+3. yes, all common movie name format. in Some cases the movie is a BDRip, meaning is a folder with rip files. in this case, only the base folder will be renamed
+4. use google translate. AWS root creds are already in the system, create anotehr set of creds only for the translation service
+5. yes, clean all, it must be in format - The Ninth Gate (1999) (IMDB 4.6).mkv
+6. rename on disk, fail gracefully if not possible
+7. yes use Cyrillic/Romanina. Use the main country 
+8. 9988
+9. a good enough schema to track new, existing and deleted movie names 
+10. Also, this for the Kodi application. if you know exactly that a poster image can be created and correctly shown by KOdi, then create it. 

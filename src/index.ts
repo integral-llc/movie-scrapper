@@ -76,7 +76,7 @@ async function bootstrap() {
     .filters { padding: 20px; background: #111; display: flex; gap: 10px; }
     .filters select, .filters input { padding: 10px; background: #1a1a1a; color: #fff; border: 1px solid #333; border-radius: 4px; }
     .movies-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 20px; padding: 20px; }
-    .movie-card { background: #1a1a1a; border-radius: 8px; overflow: hidden; transition: transform 0.2s; }
+    .movie-card { background: #1a1a1a; border-radius: 8px; overflow: hidden; transition: transform 0.2s; cursor: pointer; }
     .movie-card:hover { transform: scale(1.05); }
     .movie-poster { width: 100%; height: 300px; background: #333; display: flex; align-items: center; justify-content: center; color: #666; }
     .movie-info { padding: 15px; }
@@ -84,11 +84,38 @@ async function bootstrap() {
     .movie-year { color: #888; font-size: 14px; }
     .movie-rating { color: #e50914; font-weight: bold; margin-top: 5px; }
     .loading { text-align: center; padding: 40px; font-size: 20px; color: #888; }
+
+    /* Modal Styles */
+    .modal-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.9); z-index: 1000; overflow-y: auto; }
+    .modal-overlay.active { display: flex; justify-content: center; align-items: flex-start; padding: 40px 20px; }
+    .modal { background: #1a1a1a; border-radius: 12px; max-width: 900px; width: 100%; max-height: 90vh; overflow-y: auto; position: relative; }
+    .modal-close { position: absolute; top: 15px; right: 15px; background: #e50914; color: white; border: none; width: 36px; height: 36px; border-radius: 50%; cursor: pointer; font-size: 20px; z-index: 10; }
+    .modal-content { display: flex; flex-direction: column; }
+    .modal-header { display: flex; gap: 30px; padding: 30px; }
+    .modal-poster { width: 300px; min-width: 300px; border-radius: 8px; overflow: hidden; }
+    .modal-poster img { width: 100%; height: auto; display: block; }
+    .modal-details { flex: 1; }
+    .modal-title { font-size: 28px; font-weight: bold; margin-bottom: 10px; color: #fff; }
+    .modal-meta { display: flex; gap: 15px; flex-wrap: wrap; margin-bottom: 20px; }
+    .modal-meta-item { background: #333; padding: 6px 12px; border-radius: 4px; font-size: 14px; }
+    .modal-meta-item.rating { background: #e50914; color: white; font-weight: bold; }
+    .modal-section { margin-top: 20px; }
+    .modal-section h3 { color: #e50914; font-size: 14px; text-transform: uppercase; margin-bottom: 8px; }
+    .modal-section p, .modal-section .value { color: #ccc; font-size: 14px; line-height: 1.6; }
+    .modal-file-path { background: #0a0a0a; padding: 12px; border-radius: 6px; font-family: monospace; font-size: 12px; word-break: break-all; color: #4fc3f7; border: 1px solid #333; }
+    .modal-genres { display: flex; gap: 8px; flex-wrap: wrap; }
+    .modal-genre { background: #333; padding: 4px 10px; border-radius: 4px; font-size: 12px; }
+    .modal-footer { padding: 20px 30px; background: #111; border-top: 1px solid #333; }
+
+    @media (max-width: 768px) {
+      .modal-header { flex-direction: column; }
+      .modal-poster { width: 100%; min-width: auto; max-width: 300px; margin: 0 auto; }
+    }
   </style>
 </head>
 <body>
   <div class="header">
-    <h1>🎬 Movie Library</h1>
+    <h1>Movie Library</h1>
     <button id="scanBtn" onclick="triggerScan()" style="padding: 10px 20px; background: #e50914; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; margin-left: 20px;">Scan Movies</button>
   </div>
 
@@ -112,7 +139,19 @@ async function bootstrap() {
     <div class="loading">Loading movies...</div>
   </div>
 
+  <!-- Movie Details Modal -->
+  <div class="modal-overlay" id="movieModal" onclick="closeModal(event)">
+    <div class="modal" onclick="event.stopPropagation()">
+      <button class="modal-close" onclick="closeModal()">&times;</button>
+      <div class="modal-content" id="modalContent">
+        <div class="loading">Loading...</div>
+      </div>
+    </div>
+  </div>
+
   <script>
+    let allMovies = [];
+
     async function loadStats() {
       const res = await fetch('/movies/api/stats');
       const data = await res.json();
@@ -130,7 +169,8 @@ async function bootstrap() {
       const res = await fetch('/movies/api/list?status=' + status);
       const data = await res.json();
 
-      let movies = data.movies || [];
+      allMovies = data.movies || [];
+      let movies = allMovies;
       if (search) {
         movies = movies.filter(m => m.title.toLowerCase().includes(search.toLowerCase()));
       }
@@ -142,21 +182,122 @@ async function bootstrap() {
       }
 
       grid.innerHTML = movies.map(movie => \`
-        <div class="movie-card">
+        <div class="movie-card" onclick="showMovieDetails(\${movie.id})">
           <div class="movie-poster">
             <img src="/movies/api/thumbnails/\${movie.id}"
                  style="width:100%;height:100%;object-fit:cover;"
-                 onerror="this.parentElement.innerHTML='🎬';"
+                 onerror="this.parentElement.innerHTML='No Poster';"
                  loading="lazy" />
           </div>
           <div class="movie-info">
             <div class="movie-title">\${movie.title}</div>
-            <div class="movie-year">\${movie.year}</div>
-            <div class="movie-rating">⭐ \${movie.imdbRating > 0 ? movie.imdbRating.toFixed(1) : 'N/A'}</div>
+            <div class="movie-year">\${movie.year || 'N/A'}</div>
+            <div class="movie-rating">\${movie.imdbRating > 0 ? movie.imdbRating.toFixed(1) : 'N/A'}</div>
           </div>
         </div>
       \`).join('');
     }
+
+    async function showMovieDetails(movieId) {
+      const modal = document.getElementById('movieModal');
+      const content = document.getElementById('modalContent');
+      modal.classList.add('active');
+      document.body.style.overflow = 'hidden';
+      content.innerHTML = '<div class="loading">Loading movie details...</div>';
+
+      try {
+        const res = await fetch('/movies/api/details/' + movieId);
+        const data = await res.json();
+
+        if (!data.success || !data.movie) {
+          content.innerHTML = '<div class="loading">Movie not found</div>';
+          return;
+        }
+
+        const m = data.movie;
+        const genres = m.genre ? m.genre.split(',').map(g => g.trim()).filter(g => g) : [];
+
+        content.innerHTML = \`
+          <div class="modal-header">
+            <div class="modal-poster">
+              <img src="/movies/api/thumbnails/\${m.id}"
+                   onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%22300%22 height=%22450%22><rect fill=%22%23333%22 width=%22100%%22 height=%22100%%22/><text x=%2250%%22 y=%2250%%22 fill=%22%23666%22 text-anchor=%22middle%22 dy=%22.3em%22 font-size=%2240%22>No Poster</text></svg>';" />
+            </div>
+            <div class="modal-details">
+              <h1 class="modal-title">\${m.title}</h1>
+              <div class="modal-meta">
+                \${m.year ? \`<span class="modal-meta-item">\${m.year}</span>\` : ''}
+                \${m.imdbRating > 0 ? \`<span class="modal-meta-item rating">IMDB \${m.imdbRating.toFixed(1)}</span>\` : ''}
+                \${m.runtime ? \`<span class="modal-meta-item">\${m.runtime} min</span>\` : ''}
+                \${m.country ? \`<span class="modal-meta-item">\${m.country}</span>\` : ''}
+                \${m.language ? \`<span class="modal-meta-item">\${m.language}</span>\` : ''}
+              </div>
+
+              \${genres.length > 0 ? \`
+                <div class="modal-section">
+                  <h3>Genres</h3>
+                  <div class="modal-genres">
+                    \${genres.map(g => \`<span class="modal-genre">\${g}</span>\`).join('')}
+                  </div>
+                </div>
+              \` : ''}
+
+              \${m.director ? \`
+                <div class="modal-section">
+                  <h3>Director</h3>
+                  <p>\${m.director}</p>
+                </div>
+              \` : ''}
+
+              \${m.actors ? \`
+                <div class="modal-section">
+                  <h3>Cast</h3>
+                  <p>\${m.actors}</p>
+                </div>
+              \` : ''}
+
+              \${m.plot ? \`
+                <div class="modal-section">
+                  <h3>Plot</h3>
+                  <p>\${m.plot}</p>
+                </div>
+              \` : ''}
+            </div>
+          </div>
+          <div class="modal-footer">
+            <div class="modal-section" style="margin-top: 0;">
+              <h3>File Location</h3>
+              <div class="modal-file-path">\${m.currentPath || 'Unknown'}</div>
+            </div>
+            \${m.originalFileName ? \`
+              <div class="modal-section">
+                <h3>Original File Name</h3>
+                <div class="modal-file-path">\${m.originalFileName}</div>
+              </div>
+            \` : ''}
+            \${m.tmdbId ? \`
+              <div class="modal-section">
+                <h3>External IDs</h3>
+                <p>TMDB: \${m.tmdbId}\${m.imdbId ? ' | IMDB: ' + m.imdbId : ''}</p>
+              </div>
+            \` : ''}
+          </div>
+        \`;
+      } catch (error) {
+        content.innerHTML = '<div class="loading">Error loading movie details</div>';
+        console.error('Error:', error);
+      }
+    }
+
+    function closeModal(event) {
+      if (event && event.target !== event.currentTarget) return;
+      document.getElementById('movieModal').classList.remove('active');
+      document.body.style.overflow = '';
+    }
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') closeModal();
+    });
 
     async function triggerScan() {
       const btn = document.getElementById('scanBtn');

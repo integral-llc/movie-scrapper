@@ -73,16 +73,10 @@ export class ThumbnailService {
 
   /**
    * Get thumbnail for a poster, generating if needed
+   * Always checks if source poster has been updated since cache was created
    */
   async getThumbnail(posterPath: string): Promise<string | null> {
-    const thumbnailPath = this.getThumbnailPath(posterPath);
-
-    // If thumbnail exists, return it
-    if (fs.existsSync(thumbnailPath)) {
-      return thumbnailPath;
-    }
-
-    // Generate new thumbnail
+    // Always use generateThumbnail which properly checks modification times
     return this.generateThumbnail(posterPath);
   }
 

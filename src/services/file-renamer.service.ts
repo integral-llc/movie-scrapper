@@ -54,6 +54,14 @@ export class FileRenamerService {
       const directory = path.dirname(oldPath);
       const newPath = path.join(directory, newFileName);
 
+      // If old and new paths are the same, no rename needed - consider it a success
+      if (oldPath === newPath) {
+        return {
+          success: true,
+          newPath,
+        };
+      }
+
       if (fs.existsSync(newPath)) {
         return {
           success: false,

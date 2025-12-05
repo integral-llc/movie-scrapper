@@ -1,6 +1,6 @@
 import { ITask } from '../types/task.types';
 import { MovieRepository } from '../repositories/movie.repository';
-import { OMDBEnhancedService } from '../services/omdb-enhanced.service';
+import { TMDbService, MovieData } from '../services/tmdb.service';
 import { TranslateService } from '../services/translate.service';
 import { FileRenamerService } from '../services/file-renamer.service';
 import { KodiService } from '../services/kodi.service';
@@ -12,7 +12,7 @@ export class RetryErrorsTask implements ITask {
   name = 'RetryErrorsTask';
 
   private movieRepo: MovieRepository;
-  private omdbService: OMDBEnhancedService;
+  private tmdbService: TMDbService;
   private translateService: TranslateService;
   private fileRenamer: FileRenamerService;
   private kodiService: KodiService;
@@ -20,7 +20,7 @@ export class RetryErrorsTask implements ITask {
 
   constructor() {
     this.movieRepo = new MovieRepository();
-    this.omdbService = new OMDBEnhancedService();
+    this.tmdbService = new TMDbService();
     this.translateService = new TranslateService();
     this.fileRenamer = new FileRenamerService();
     this.kodiService = new KodiService();
@@ -51,39 +51,37 @@ export class RetryErrorsTask implements ITask {
         console.log(`  Translated: ${searchTitle}`);
       }
 
-      const imdbData = await this.omdbService.searchMovieIntelligent(searchTitle, year);
+      // Use TMDb service with improved matching algorithm
+      const movieData = await this.tmdbService.searchMovie(searchTitle, year);
 
-      if (!imdbData) {
+      if (!movieData) {
         console.log(`  ✗ Still not found`);
         stillFailed++;
         continue;
       }
 
-      const movieYear = parseInt(imdbData.Year, 10);
-      const imdbRating = parseFloat(imdbData.imdbRating);
-
-      if (isNaN(imdbRating)) {
+      if (!movieData.imdbRating || movieData.imdbRating <= 0) {
         console.log(`  ✗ Invalid IMDB rating`);
         stillFailed++;
         continue;
       }
 
-      const mainCountry = this.extractMainCountry(imdbData.Country);
-      let finalTitle = imdbData.Title;
+      const mainCountry = this.extractMainCountry(movieData.country);
+      let finalTitle = movieData.title;
 
       if (this.shouldUseRussian(mainCountry)) {
-        finalTitle = await this.translateService.translateToRussian(imdbData.Title);
+        finalTitle = await this.translateService.translateToRussian(movieData.title);
         console.log(`  Translated to Russian: ${finalTitle}`);
       } else if (this.shouldUseRomanian(mainCountry)) {
-        finalTitle = await this.translateService.translateToRomanian(imdbData.Title);
+        finalTitle = await this.translateService.translateToRomanian(movieData.title);
         console.log(`  Translated to Romanian: ${finalTitle}`);
       }
 
       const extension = movie.isFolder ? '' : path.extname(movie.currentPath);
       const newFileName = this.nameParser.buildFileName(
         finalTitle,
-        movieYear,
-        imdbRating,
+        movieData.year,
+        movieData.imdbRating,
         extension
       );
 
@@ -93,16 +91,14 @@ export class RetryErrorsTask implements ITask {
         currentPath: renameResult.success ? renameResult.newPath! : movie.currentPath,
         fileName: renameResult.success ? newFileName : movie.fileName,
         title: finalTitle,
-        year: movieYear,
-        imdbRating,
-        imdbId: imdbData.imdbID,
+        year: movieData.year,
+        imdbRating: movieData.imdbRating,
+        imdbId: movieData.imdbId,
         country: mainCountry,
-        language: imdbData.Language,
-        plot: imdbData.Plot,
-        genre: imdbData.Genre,
-        director: imdbData.Director,
-        actors: imdbData.Actors,
-        posterUrl: imdbData.Poster !== 'N/A' ? imdbData.Poster : undefined,
+        language: movieData.language,
+        plot: movieData.plot,
+        genre: movieData.genre,
+        posterUrl: movieData.posterUrl || undefined,
         status: 'active',
         errorMessage: renameResult.success ? undefined : renameResult.error,
         updatedAt: new Date().toISOString(),
@@ -117,7 +113,7 @@ export class RetryErrorsTask implements ITask {
         }
       }
 
-      console.log(`  ✓ FIXED: ${finalTitle} (${movieYear}) - IMDB ${imdbRating}`);
+      console.log(`  ✓ FIXED: ${finalTitle} (${movieData.year}) - IMDB ${movieData.imdbRating}`);
       fixed++;
     }
 

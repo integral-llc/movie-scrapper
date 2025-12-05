@@ -33,15 +33,16 @@ export class FileScanner {
               isFolder: true,
             });
           } else if (this.isTVSeriesFolder(fullPath)) {
-            // Process TV series folder as a movie (for folder renaming)
+            // Add TV series folder as a special type - don't scan inside, but track it
+            console.log(`  Found TV series folder: ${entry.name}`);
             movies.push({
               fullPath,
               directory: path.dirname(fullPath),
               fileName: entry.name,
               extension: '',
               isFolder: true,
+              isTVSeries: true,
             });
-            // Don't scan inside - skip the episode files
           } else {
             this.scanRecursive(fullPath, movies);
           }
@@ -78,6 +79,25 @@ export class FileScanner {
 
   private isTVSeriesFolder(folderPath: string): boolean {
     try {
+      const folderName = path.basename(folderPath);
+
+      // Quick check: if folder name is "Season XX" or "Сезон XX", it's a TV series
+      if (/^(season|сезон)\s*\d+$/i.test(folderName)) {
+        return true;
+      }
+
+      // Detect torrent-style TV series folders with SXX pattern (e.g., "Name.S01.2025.WEB-DL")
+      // The S must be preceded by a dot, space, or be at position after alphanumeric
+      // and followed by 1-2 digits and then a dot, space, or end
+      if (/[.\s]S\d{1,2}(?:[.\s]|$)/i.test(folderName)) {
+        return true;
+      }
+
+      // Detect Russian-style TV series with " - S01" suffix
+      if (/\s+-\s+S\d{1,2}$/i.test(folderName)) {
+        return true;
+      }
+
       const entries = fs.readdirSync(folderPath, { withFileTypes: true });
       const videoFiles = entries
         .filter((e) => e.isFile())
@@ -91,8 +111,9 @@ export class FileScanner {
 
       // Check if files have episode patterns:
       // - English: "01. Title", "S01E01", "Episode 1"
-      // - Russian: "Title 01 сер", "серия 01", "сер. 01"
-      const episodePattern = /^(\d{1,2})[.\s-]+|s\d{1,2}[.\s]?e\d{1,2}|\d{1,2}\s*сер|\bсерия\s*\d+|\bсер\.?\s*\d+/i;
+      // - Russian: "Title 01 сер", "серия 01", "сер. 01", "01 Title"
+      // - Also detect numbered files like "01 Title", "06 Another Title"
+      const episodePattern = /^(\d{1,2})[.\s-]+|s\d{1,2}[.\s]?e\d{1,2}|\d{1,2}\s*сер|\bсерия\s*\d+|\bсер\.?\s*\d+|^0\d\s+\S/i;
       const episodeFiles = videoFiles.filter((f) => episodePattern.test(f.name));
 
       // If less than 50% have episode patterns, not a TV series

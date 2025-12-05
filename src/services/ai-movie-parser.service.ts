@@ -50,10 +50,19 @@ Determine:
 5. Is this a TV EPISODE (single episode file)?
 6. Is this an audio/music file?
 
+IMPORTANT RULES FOR TITLE EXTRACTION:
+- Movie titles often have subtitles after a colon, e.g., "Predator: Badlands", "Spider-Man: No Way Home"
+- Words like "Badlands", "Resurrection", "Uprising", "Legacy", "Origins" are often PART OF THE TITLE, not release groups
+- Release groups typically start with a dash and contain random letters/numbers: -YIFY, -RARBG, -EniaHD, -playHD
+- If a word appears BEFORE quality tags (720p, 1080p, BluRay, etc.), it's likely part of the title
+- Example: "Predator.Badlands.CHDRip.1080p" -> title is "Predator Badlands" (Badlands comes before CHDRip)
+- Example: "Movie.Name.2024.1080p.BluRay-YIFY" -> title is "Movie Name" (YIFY is release group after quality)
+
 Common patterns to recognize:
-- Quality: 720p, 1080p, 2160p, 4K, BluRay, WEB-DL, HDRip, etc.
-- Codecs: x264, x265, HEVC, AVC, etc.
-- Release groups: -YIFY, -RARBG, -EniaHD, etc.
+- Quality: 720p, 1080p, 2160p, 4K, BluRay, WEB-DL, HDRip, BDRip, CHDRip, REMUX, etc.
+- Codecs: x264, x265, HEVC, AVC, H264, H265, etc.
+- Release groups: -YIFY, -RARBG, -EniaHD, -playHD (usually at the end after a dash)
+- Audio: DD5.1, DTS, AAC, AC3, Atmos
 - Russian episodes: "01 сер", "серия 01", "сер. 01"
 - English episodes: S01E01, Season 1, Episode 1, "01. Title"
 - Audio/demo indicators: "Atmos Mix", "Atmos Test", "DAR Atmos", "OST", "Soundtrack", "Demo", "Test", "SG DAR", "SG Atmos"
@@ -368,6 +377,74 @@ Respond in JSON format only:
       .replace(/&#39;/g, "'")
       .replace(/&#x27;/g, "'")
       .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(parseInt(code, 10)));
+  }
+
+  /**
+   * Use LLM to intelligently determine if two titles refer to the same movie.
+   * This handles cases like:
+   * - "Transformers - Dark of the Moon" vs "Transformers: Dark of the Moon"
+   * - Different punctuation, capitalization
+   * - Subtitle variations
+   * - Minor formatting differences
+   */
+  async areTitlesSameMovie(title1: string, title2: string, year?: number): Promise<{ isSame: boolean; confidence: number; reasoning?: string }> {
+    const prompt = `Determine if these two strings refer to the SAME movie title.
+
+Title 1: "${title1}"
+Title 2: "${title2}"
+${year ? `Expected Year: ${year}` : ''}
+
+Consider:
+- Punctuation differences (colon vs dash vs hyphen)
+- Subtitle separators (: - — –)
+- Minor spelling variations
+- "The" prefix/suffix variations
+- Numbering formats (2, II, Two)
+- Translations or transliterations
+
+IMPORTANT: Only return true if these titles clearly refer to the same specific movie.
+Do NOT match different movies that happen to share some words.
+
+Examples of SAME movie:
+- "Transformers - Dark of the Moon" and "Transformers: Dark of the Moon" → SAME
+- "Spider-Man: No Way Home" and "Spider-Man - No Way Home" → SAME
+- "The Lord of the Rings: The Two Towers" and "Lord of the Rings: Two Towers" → SAME
+
+Examples of DIFFERENT movies:
+- "The Baker" and "Christmas at the Amish Bakery" → DIFFERENT
+- "What If" and "What If: Aka Laow" → DIFFERENT (different movies/shows)
+- "Dune" and "Dune: Part Two" → Could be DIFFERENT (sequels)
+
+Respond in JSON format only:
+{
+  "isSame": true/false,
+  "confidence": 0.0-1.0,
+  "reasoning": "Brief explanation"
+}`;
+
+    try {
+      const response = await this.getOpenAI().chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.1,
+        response_format: { type: 'json_object' },
+      });
+
+      const content = response.choices[0]?.message?.content;
+      if (!content) {
+        return { isSame: false, confidence: 0 };
+      }
+
+      const parsed = JSON.parse(content);
+      return {
+        isSame: parsed.isSame ?? false,
+        confidence: parsed.confidence ?? 0.5,
+        reasoning: parsed.reasoning,
+      };
+    } catch (error) {
+      console.error('LLM title matching failed:', error);
+      return { isSame: false, confidence: 0 };
+    }
   }
 
   /**

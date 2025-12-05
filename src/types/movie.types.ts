@@ -45,6 +45,7 @@ export interface MovieFileInfo {
   fileName: string;
   extension: string;
   isFolder: boolean;
+  isTVSeries?: boolean;
 }
 
 export interface ScanResult {
