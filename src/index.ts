@@ -4,6 +4,7 @@ import { initConfig, getConfig } from './config/env.config';
 import { TaskRunner } from './tasks/task-runner';
 import { MovieScanTask } from './tasks/movie-scan.task';
 import { RetryErrorsTask } from './tasks/retry-errors.task';
+import { MediaOrganizeTask } from './tasks/media-organize.task';
 import { Scheduler } from './utils/scheduler.util';
 import { MovieController } from './controllers/movie.controller';
 import { ThumbnailController } from './controllers/thumbnail.controller';
@@ -23,6 +24,7 @@ async function bootstrap() {
   const taskRunner = new TaskRunner();
   taskRunner.registerTask(new MovieScanTask());
   taskRunner.registerTask(new RetryErrorsTask());
+  taskRunner.registerTask(new MediaOrganizeTask());
 
   const scheduler = new Scheduler(taskRunner);
   scheduler.scheduleMovieScan();
@@ -42,6 +44,7 @@ async function bootstrap() {
         'GET /movies/api/stats': 'Get statistics',
         'GET /movies/api/thumbnails/:id': 'Get movie poster thumbnail',
         'POST /movies/api/scan': 'Trigger manual scan',
+        'POST /movies/api/organize': 'Organize media with AI-powered naming, NFO and posters',
         'POST /movies/api/cleanup-duplicates': 'Clean up duplicate NFO/poster files',
         'POST /movies/api/retry-errors': 'Retry all error movies with enhanced search',
         'GET /movies/api/tasks': 'Get registered tasks',
@@ -343,6 +346,19 @@ async function bootstrap() {
   });
 
   app.post('/movies/api/cleanup-duplicates', movieController.cleanupDuplicates);
+
+  app.post('/movies/api/organize', async (_req: Request, res: Response) => {
+    try {
+      console.log('Media organize triggered via API');
+      res.json({ success: true, message: 'Media organize started' });
+
+      taskRunner.executeTask('MediaOrganizeTask').catch((error) => {
+        console.error('Media organize failed:', error);
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, error: 'Failed to trigger media organize' });
+    }
+  });
 
   app.post('/movies/api/retry-errors', async (_req: Request, res: Response) => {
     try {
