@@ -21,6 +21,7 @@ export const BDRIP_INDICATORS = [
   'playlist',
   'clipinf',
   'stream',
+  'video_ts',  // DVD structure
 ];
 
 export const MOVIE_NAME_PATTERNS = {

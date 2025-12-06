@@ -7,8 +7,10 @@ import { FileRenamerService } from './file-renamer.service';
 import { KodiService } from './kodi.service';
 import { PosterService } from './poster.service';
 import { AIMovieParserService } from './ai-movie-parser.service';
+import { TitleMatcherService } from './title-matcher.service';
 import { FileScanner } from '../utils/file-scanner.util';
 import { MovieNameParser } from '../utils/movie-name-parser.util';
+import { TVSeriesNameParser } from '../utils/tv-series-name-parser.util';
 import { Movie, MovieFileInfo, ScanResult } from '../types/movie.types';
 import { CYRILLIC_COUNTRIES, ROMANIAN_COUNTRIES } from '../config/constants';
 import { getConfig } from '../config/env.config';
@@ -22,7 +24,9 @@ export class MovieScannerTMDbService {
   private posterService: PosterService;
   private fileScanner: FileScanner;
   private nameParser: MovieNameParser;
+  private tvSeriesParser: TVSeriesNameParser;
   private aiParser: AIMovieParserService;
+  private titleMatcher: TitleMatcherService;
 
   constructor() {
     this.movieRepo = new MovieRepository();
@@ -33,7 +37,9 @@ export class MovieScannerTMDbService {
     this.posterService = new PosterService();
     this.fileScanner = new FileScanner();
     this.nameParser = new MovieNameParser();
+    this.tvSeriesParser = new TVSeriesNameParser();
     this.aiParser = new AIMovieParserService();
+    this.titleMatcher = new TitleMatcherService();
   }
 
   async scanMovies(): Promise<ScanResult> {
@@ -87,47 +93,105 @@ export class MovieScannerTMDbService {
     const existingMovie = this.movieRepo.findByPath(fileInfo.fullPath);
 
     if (existingMovie && existingMovie.status === 'active') {
-      const directory = path.dirname(fileInfo.fullPath);
-      const extension = path.extname(fileInfo.fullPath);
-      const baseFileName = existingMovie.fileName.replace(extension, '');
-      const posterPath = path.join(directory, `${baseFileName}-poster.jpg`);
-      const nfoPath = path.join(directory, `${baseFileName}.nfo`);
+      // For TV series with generic "Season XX" names, fix the title to include parent folder
+      // Check both fileInfo.isTVSeries (new detection) and existingMovie.genre (previous detection)
+      if (fileInfo.isTVSeries || existingMovie.genre === 'TV Series') {
+        const genericSeasonPattern = /^(season|сезон)\s*\d+$/i;
+        const isGenericSeason = genericSeasonPattern.test(fileInfo.fileName);
+        // fileInfo.directory is path.dirname(fullPath), e.g., /mnt/movies/CyberStalker for Season 01 folder
+        const parentFolder = path.basename(fileInfo.directory);
+        let betterTitle = existingMovie.title;
+        let searchTitle = fileInfo.fileName;
 
-      // Check if poster or NFO file is missing on disk
-      const posterMissing = !fs.existsSync(posterPath);
-      const nfoMissing = !fs.existsSync(nfoPath);
-      const needsPosterUrl = !existingMovie.posterUrl || existingMovie.posterUrl === 'N/A';
+        console.log(`  TV Series check: fileName="${fileInfo.fileName}", parentFolder="${parentFolder}", isGenericSeason=${isGenericSeason}`);
 
-      if (posterMissing || nfoMissing || needsPosterUrl) {
-        console.log(`\nRegenerating metadata for: ${existingMovie.fileName}`);
-        if (posterMissing) console.log(`  - Poster file missing: ${posterPath}`);
-        if (nfoMissing) console.log(`  - NFO file missing: ${nfoPath}`);
+        if (isGenericSeason && parentFolder && parentFolder !== 'movies') {
+          betterTitle = `${parentFolder} - ${fileInfo.fileName}`;
+          searchTitle = parentFolder; // Search TMDB using parent folder name, not "Season 01"
+          console.log(`  Will update title: "${existingMovie.title}" → "${betterTitle}"`);
+        } else {
+          // For non-generic TV series folders, parse and clean the folder name
+          const tvParsed = this.tvSeriesParser.parse(fileInfo.fileName);
+          betterTitle = tvParsed.cleanName;
+          searchTitle = tvParsed.cleanName;
+          console.log(`  TV series parsed: "${fileInfo.fileName}" → "${searchTitle}" (year: ${tvParsed.year}, season: ${tvParsed.season}, translit: ${tvParsed.isTranslit})`);
+        }
 
-        // Search TMDb to get poster URL if needed
-        if (needsPosterUrl || posterMissing) {
-          const { cleanName, year } = this.nameParser.cleanMovieName(existingMovie.fileName);
-          const movieData = await this.tmdbService.searchMovie(cleanName, year);
+        // Check if poster is missing and needs to be downloaded
+        const posterPath = path.join(fileInfo.fullPath, `${fileInfo.fileName}-poster.jpg`);
+        const hasPoster = fs.existsSync(posterPath);
 
+        if (!hasPoster || !existingMovie.posterUrl) {
+          console.log(`  TV series "${betterTitle}" missing poster, searching TMDB for: "${searchTitle}"`);
+          const movieData = await this.tmdbService.searchTV(searchTitle);
           if (movieData && movieData.posterUrl) {
+            // Use TMDB title (which is in original language, e.g., Cyrillic for Russian)
+            const tmdbTitle = movieData.title || betterTitle;
+            console.log(`  ✓ Found TV poster for "${searchTitle}" → "${tmdbTitle}"`);
             await this.posterService.downloadAndWatermarkPoster(
               movieData.posterUrl,
               posterPath,
-              existingMovie.imdbRating
+              0 // No IMDB rating for TV series
             );
-            existingMovie.posterUrl = movieData.posterUrl;
+            // Update record with poster URL and TMDB title (in original language)
+            this.movieRepo.update(existingMovie.id!, {
+              title: tmdbTitle,
+              posterUrl: movieData.posterUrl,
+              lastScanned: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            });
+            result.updated++;
+            return;
+          } else {
+            console.log(`  ✗ No TV poster found for "${searchTitle}"`);
           }
-        } else if (posterMissing && existingMovie.posterUrl) {
-          // We have URL in DB but file is missing - redownload
+        }
+
+        // Only update if title needs to change - but search TMDb to get proper Cyrillic title
+        if (existingMovie.title !== betterTitle) {
+          // Search TMDb to get proper title in original language (e.g., Cyrillic for Russian)
+          console.log(`  TV series title needs update, searching TMDb for proper title: "${searchTitle}"`);
+          const movieData = await this.tmdbService.searchTV(searchTitle);
+          const finalTitle = movieData?.title || betterTitle;
+          console.log(`  Fixing TV series title: "${existingMovie.title}" → "${finalTitle}"`);
+          this.movieRepo.update(existingMovie.id!, {
+            title: finalTitle,
+            lastScanned: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          });
+          result.updated++;
+          return;
+        }
+
+        // TV series - just update timestamps
+        this.movieRepo.update(existingMovie.id!, {
+          lastScanned: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+        result.updated++;
+        return;
+      }
+
+      // Check if poster needs to be regenerated
+      if (!existingMovie.posterUrl || existingMovie.posterUrl === 'N/A') {
+        console.log(`\nRegenerating poster for: ${existingMovie.fileName}`);
+        // Search TMDb again to get poster URL
+        const { cleanName, year } = this.nameParser.cleanMovieName(existingMovie.fileName);
+        const movieData = await this.tmdbService.searchMovie(cleanName, year);
+
+        if (movieData && movieData.posterUrl) {
+          const directory = path.dirname(fileInfo.fullPath);
+          const extension = path.extname(fileInfo.fullPath);
+          const baseFileName = existingMovie.fileName.replace(extension, '');
+          const posterPath = path.join(directory, `${baseFileName}-poster.jpg`);
+
           await this.posterService.downloadAndWatermarkPoster(
-            existingMovie.posterUrl,
+            movieData.posterUrl,
             posterPath,
             existingMovie.imdbRating
           );
-        }
 
-        // Regenerate NFO if missing
-        if (nfoMissing) {
-          await this.kodiService.createNFOFile(existingMovie, directory);
+          existingMovie.posterUrl = movieData.posterUrl;
         }
       }
 
@@ -148,6 +212,14 @@ export class MovieScannerTMDbService {
       this.movieRepo.delete(existingMovie.id!);
     }
 
+    // Handle TV series folders specially - don't try to match to TMDb, just track as-is
+    if (fileInfo.isTVSeries) {
+      console.log(`\nTV Series folder: ${fileInfo.fileName}`);
+      await this.createTVSeriesEntry(fileInfo);
+      result.created++;
+      return;
+    }
+
     // Quick pre-check for obvious demo/test files (skip AI parsing for these)
     const demoPatterns = /atmos\s*(mix|test)|sg\s*dar|demo\s*test|audio\s*test|test\s*file/i;
     if (demoPatterns.test(fileInfo.fileName) || demoPatterns.test(fileInfo.fullPath)) {
@@ -162,7 +234,16 @@ export class MovieScannerTMDbService {
     const aiParsed = await this.aiParser.parseFileName(fileInfo.fileName);
 
     const cleanName = aiParsed.title;
-    const year = aiParsed.year;
+    // Use AI year if available, otherwise try to extract from filename using regex
+    let year = aiParsed.year;
+    if (!year) {
+      // Fallback: extract year from filename using regex (e.g., "Грейхаунд.2020.WEB-DL" -> 2020)
+      const yearMatch = fileInfo.fileName.match(/[.\s(]?((?:19|20)\d{2})[.\s)]/);
+      if (yearMatch) {
+        year = parseInt(yearMatch[1], 10);
+        console.log(`  Year extracted from filename: ${year}`);
+      }
+    }
 
     // Skip TV episodes (AI detection)
     if (aiParsed.isTVEpisode) {
@@ -186,151 +267,88 @@ export class MovieScannerTMDbService {
     let searchTitle = cleanName;
     let originalTitle = cleanName;
 
-    // Try AI-powered IMDB search FIRST for better accuracy
-    console.log(`  Searching IMDB directly...`);
-    const imdbResult = await this.aiParser.searchIMDb(cleanName, year);
-
     let movieData = null;
 
-    // Validate IMDB result matches search title before accepting
-    const imdbTitleMatches = imdbResult && imdbResult.rating > 0 &&
-      this.isTitleMatch(cleanName, imdbResult.title);
+    // For non-English titles, skip IMDB and go straight to TMDb (better at translations)
+    if (detectedLanguage !== 'en') {
+      console.log(`  Non-English title detected (${detectedLanguage}), using TMDb directly...`);
+      movieData = await this.tmdbService.searchMovie(cleanName, year);
 
-    if (imdbResult && imdbResult.rating > 0 && imdbTitleMatches) {
-      // Found on IMDB - use TMDb to get additional metadata
-      console.log(`  ✓ IMDB found: ${imdbResult.title} (${imdbResult.year}) - Rating ${imdbResult.rating}`);
-      const tmdbData = await this.tmdbService.searchMovie(imdbResult.title, imdbResult.year);
+      // If TMDb finds a match with matching year, accept it (bypass strict title match)
+      if (movieData && year && movieData.year && Math.abs(year - movieData.year) <= 1) {
+        console.log(`  ✓ TMDb found: ${movieData.title} (${movieData.year}) - accepting via year match`);
+        // Mark that we already validated via year match
+        searchTitle = movieData.title; // This ensures later title validation passes
+      } else if (movieData) {
+        // Year doesn't match well - be more careful
+        console.log(`  Year mismatch: searched ${year || 'unknown'} but found ${movieData.year} - checking title...`);
+        // Keep the result but let the later validation check it
+      }
 
-      // Validate that TMDb result matches IMDB result (title similarity check)
-      if (tmdbData && this.isTitleMatch(imdbResult.title, tmdbData.title)) {
-        movieData = tmdbData;
-        // Override with accurate IMDB data
-        movieData.imdbRating = imdbResult.rating;
-        movieData.imdbId = imdbResult.imdbId;
-        if (imdbResult.posterUrl && !movieData.posterUrl) {
-          movieData.posterUrl = imdbResult.posterUrl;
-        }
-        console.log(`  TMDb metadata enriched: ${tmdbData.title}`);
-      } else {
-        // TMDb returned a different movie or nothing - use IMDB data only
-        if (tmdbData) {
-          console.log(`  TMDb returned different movie: "${tmdbData.title}" - using IMDB data instead`);
-        } else {
-          console.log(`  TMDb doesn't have this movie, using IMDB data only`);
-        }
-        movieData = {
-          title: imdbResult.title,
-          originalTitle: imdbResult.title,
-          year: imdbResult.year,
-          imdbRating: imdbResult.rating,
-          imdbId: imdbResult.imdbId,
-          tmdbId: 0,
-          country: '',
-          language: '',
-          plot: '',
-          genre: '',
-          posterUrl: imdbResult.posterUrl || '',
-          backdropUrl: '',
-        };
+      // If nothing found with original, try translating
+      if (!movieData) {
+        console.log(`  Not found, translating to English...`);
+        searchTitle = await this.translateService.translateToEnglish(cleanName, detectedLanguage);
+        console.log(`  Translated: ${searchTitle}`);
+        movieData = await this.tmdbService.searchMovie(searchTitle, year);
       }
     } else {
-      // IMDB search failed or returned wrong movie, fall back to TMDb
-      if (imdbResult && imdbResult.rating > 0 && !imdbTitleMatches) {
-        console.log(`  IMDB returned wrong movie: "${imdbResult.title}" - trying TMDb directly...`);
-      } else {
-        console.log(`  IMDB search failed, trying TMDb...`);
-      }
-      movieData = await this.tmdbService.searchMovie(cleanName, year);
-    }
+      // For English titles, try AI-powered IMDB search FIRST for better accuracy
+      console.log(`  Searching IMDB directly...`);
+      const imdbResult = await this.aiParser.searchIMDb(cleanName, year);
 
-    // If not found and non-English
-    if (!movieData && detectedLanguage !== 'en') {
-      // For Russian titles, don't translate - try IMDB directly with AI
-      if (detectedLanguage === 'ru') {
-        console.log(`  ✗ Russian title not found in TMDb - searching IMDB directly...`);
+      // Validate IMDB result matches search title before accepting (use TitleMatcherService)
+      const imdbMatchResult = imdbResult && imdbResult.rating > 0 ?
+        await this.titleMatcher.areSameMovie(cleanName, imdbResult.title, { year, useLLM: false }) : null;
+      const imdbTitleMatches = imdbMatchResult && imdbMatchResult.isMatch;
 
-        // Try AI-powered IMDB search
-        const imdbResult = await this.aiParser.searchIMDb(cleanName, year);
+      if (imdbResult && imdbResult.rating > 0 && imdbTitleMatches) {
+        // Found on IMDB - use TMDb to get additional metadata
+        console.log(`  ✓ IMDB found: ${imdbResult.title} (${imdbResult.year}) - Rating ${imdbResult.rating}`);
+        const tmdbData = await this.tmdbService.searchMovie(imdbResult.title, imdbResult.year);
 
-        let finalRating = 0;
-        let finalImdbId = '';
-        let finalPosterUrl: string | undefined;
-
-        if (imdbResult) {
-          console.log(`  ✓ Found on IMDB: ${imdbResult.title} (${imdbResult.year}) - Rating ${imdbResult.rating}`);
-          finalRating = imdbResult.rating;
-          finalImdbId = imdbResult.imdbId;
-          finalPosterUrl = imdbResult.posterUrl;
-        } else {
-          console.log(`  ✗ Not found on IMDB either - preserving original name`);
-        }
-
-        const extension = fileInfo.isFolder ? '' : path.extname(fileInfo.fullPath);
-        const newFileName = finalRating > 0
-          ? this.nameParser.buildFileName(cleanName, year || 0, finalRating, extension)
-          : this.buildMissingMovieFileName(cleanName, year, extension);
-        const renameResult = this.fileRenamer.renameFile(fileInfo.fullPath, newFileName);
-
-        const movie: Omit<Movie, 'id'> = {
-          originalPath: fileInfo.fullPath,
-          currentPath: renameResult.success ? renameResult.newPath! : fileInfo.fullPath,
-          fileName: renameResult.success ? newFileName : fileInfo.fileName,
-          originalFileName: fileInfo.fileName,
-          title: cleanName,
-          year: year || 0,
-          imdbRating: finalRating,
-          imdbId: finalImdbId,
-          country: 'Russia',
-          language: 'Russian',
-          plot: null,
-          genre: null,
-          director: null,
-          actors: null,
-          posterUrl: finalPosterUrl || null,
-          isFolder: fileInfo.isFolder,
-          lastScanned: new Date().toISOString(),
-          status: 'active',
-          errorMessage: null,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        };
-
-        const createdMovie = this.movieRepo.create(movie);
-        result.created++;
-
-        // Always clean up old metadata files, regardless of rename success
-        const directory = path.dirname(renameResult.success ? renameResult.newPath! : fileInfo.fullPath);
-        this.fileRenamer.cleanupOldMetadataFiles(directory, cleanName, finalRating);
-
-        // Update currentPaths with renamed path
-        if (renameResult.success && renameResult.newPath) {
-          currentPaths.delete(fileInfo.fullPath);
-          currentPaths.add(renameResult.newPath);
-
-          // Create NFO
-          await this.kodiService.createNFOFile(createdMovie, directory);
-
-          // Download poster if available
-          if (finalPosterUrl && finalRating > 0) {
-            const baseFileName = newFileName.replace(extension, '');
-            const posterPath = path.join(directory, `${baseFileName}-poster.jpg`);
-            await this.posterService.downloadAndWatermarkPoster(
-              finalPosterUrl,
-              posterPath,
-              finalRating
-            );
+        // Validate that TMDb result matches IMDB result (use TitleMatcherService)
+        const tmdbMatchResult = tmdbData ? await this.titleMatcher.areSameMovie(imdbResult.title, tmdbData.title, { useLLM: false }) : null;
+        if (tmdbData && tmdbMatchResult && tmdbMatchResult.isMatch) {
+          movieData = tmdbData;
+          // Override with accurate IMDB data
+          movieData.imdbRating = imdbResult.rating;
+          movieData.imdbId = imdbResult.imdbId;
+          if (imdbResult.posterUrl && !movieData.posterUrl) {
+            movieData.posterUrl = imdbResult.posterUrl;
           }
+          console.log(`  TMDb metadata enriched: ${tmdbData.title}`);
+        } else {
+          // TMDb returned a different movie or nothing - use IMDB data only
+          if (tmdbData) {
+            console.log(`  TMDb returned different movie: "${tmdbData.title}" - using IMDB data instead`);
+          } else {
+            console.log(`  TMDb doesn't have this movie, using IMDB data only`);
+          }
+          movieData = {
+            title: imdbResult.title,
+            originalTitle: imdbResult.title,
+            year: imdbResult.year,
+            imdbRating: imdbResult.rating,
+            imdbId: imdbResult.imdbId,
+            tmdbId: 0,
+            country: '',
+            language: '',
+            plot: '',
+            genre: '',
+            posterUrl: imdbResult.posterUrl || '',
+            backdropUrl: '',
+          };
         }
-
-        console.log(`  ✓ ${cleanName} (${year}) - IMDB ${finalRating > 0 ? finalRating : 'N/A'}`);
-        return;
+      } else {
+        // IMDB search failed or returned wrong movie, fall back to TMDb
+        if (imdbResult && imdbResult.rating > 0 && !imdbTitleMatches) {
+          console.log(`  IMDB returned wrong movie: "${imdbResult.title}" - trying TMDb directly...`);
+        } else {
+          console.log(`  IMDB search failed, trying TMDb...`);
+        }
+        movieData = await this.tmdbService.searchMovie(cleanName, year);
       }
-
-      // For other languages, try translation
-      console.log(`  Original title not found, translating...`);
-      searchTitle = await this.translateService.translateToEnglish(cleanName, detectedLanguage);
-      console.log(`  Translated: ${searchTitle}`);
-      movieData = await this.tmdbService.searchMovie(searchTitle, year);
     }
 
     if (!movieData) {
@@ -395,10 +413,65 @@ export class MovieScannerTMDbService {
       return;
     }
 
-    // CRITICAL: Validate that the found movie actually matches the original search title
-    // This prevents completely wrong movies (e.g., "Pi" instead of "The Ninth Gate")
-    if (!this.isTitleMatch(cleanName, movieData.title) && !this.isTitleMatch(cleanName, movieData.originalTitle)) {
-      console.log(`  ✗ Title mismatch: searched "${cleanName}" but found "${movieData.title}" - rejecting`);
+    // CRITICAL: Validate that the found movie actually matches the search title
+    // Use simple normalized comparison first, then TitleMatcherService for edge cases
+
+    // Simple normalized comparison - handles punctuation variants like : vs -
+    const simpleNormalize = (title: string) => {
+      return title
+        .toLowerCase()
+        .replace(/&amp;/g, '&')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '') // Remove accents
+        .replace(/^the\s+/i, '') // Remove "The" prefix
+        .replace(/,\s*the$/i, '') // Remove ", The" suffix
+        .replace(/[^\w\s]/g, ' ') // Replace all punctuation with spaces
+        .replace(/\s+/g, ' ')
+        .trim();
+    };
+
+    const normalizedClean = simpleNormalize(cleanName);
+    const normalizedTmdb = simpleNormalize(movieData.title);
+    const normalizedOriginal = movieData.originalTitle ? simpleNormalize(movieData.originalTitle) : null;
+
+    // Fast path: normalized titles match directly
+    const directNormalizedMatch = normalizedClean === normalizedTmdb ||
+      (normalizedOriginal && normalizedClean === normalizedOriginal);
+
+    let titleMatchesOriginal = directNormalizedMatch;
+
+    // If direct match fails, use TitleMatcherService for fuzzy/LLM matching
+    if (!directNormalizedMatch) {
+      const titleMatchResult = await this.titleMatcher.areSameMovie(cleanName, movieData.title, { year, useLLM: true });
+      titleMatchesOriginal = titleMatchResult.isMatch ||
+        (movieData.originalTitle && (await this.titleMatcher.areSameMovie(cleanName, movieData.originalTitle, { year, useLLM: false })).isMatch);
+
+      if (titleMatchResult.isMatch) {
+        console.log(`  ✓ Title match (${titleMatchResult.method}, ${(titleMatchResult.confidence * 100).toFixed(0)}%): "${cleanName}" ↔ "${movieData.title}"`);
+      }
+    } else {
+      console.log(`  ✓ Title match (normalized): "${cleanName}" ↔ "${movieData.title}"`);
+    }
+
+    // Also check translated title if different from cleanName
+    const titleMatchesTranslated = searchTitle !== cleanName &&
+      ((await this.titleMatcher.areSameMovie(searchTitle, movieData.title, { year, useLLM: false })).isMatch ||
+       (movieData.originalTitle && (await this.titleMatcher.areSameMovie(searchTitle, movieData.originalTitle, { year, useLLM: false })).isMatch));
+
+    // When source title is non-English and TMDb found a result, allow it if:
+    // 1. The year matches or is close (strong indicator it's the same movie)
+    // 2. TMDb explicitly matched on this foreign title search
+    // This handles cases like "Грейхаунд" -> "Greyhound" where TMDb internally translates
+    const yearMatches = year && movieData.year && Math.abs(year - movieData.year) <= 1;
+    const nonEnglishWithYearMatch = detectedLanguage !== 'en' && yearMatches;
+
+    if (nonEnglishWithYearMatch) {
+      console.log(`  ✓ Accepting non-English title "${cleanName}" matching "${movieData.title}" (${movieData.year}) via year match`);
+    }
+
+    // If no match found, reject
+    if (!titleMatchesOriginal && !titleMatchesTranslated && !nonEnglishWithYearMatch) {
+      console.log(`  ✗ Title mismatch: "${cleanName}" vs "${movieData.title}" - different movies`);
       this.createErrorMovie(fileInfo, `Title mismatch: found "${movieData.title}" instead of "${cleanName}"`);
       result.errors++;
       return;
@@ -434,10 +507,18 @@ export class MovieScannerTMDbService {
 
     const renameResult = this.fileRenamer.renameFile(fileInfo.fullPath, newFileName);
 
+    // Check if file already has the correct name (rename returned "file already exists")
+    const alreadyCorrectName = !renameResult.success &&
+      renameResult.error?.includes('already exists') &&
+      fileInfo.fileName === newFileName;
+
+    const finalPath = renameResult.success ? renameResult.newPath! : fileInfo.fullPath;
+    const finalFileName = renameResult.success ? newFileName : fileInfo.fileName;
+
     const movie: Omit<Movie, 'id'> = {
       originalPath: fileInfo.fullPath,
-      currentPath: renameResult.success ? renameResult.newPath! : fileInfo.fullPath,
-      fileName: renameResult.success ? newFileName : fileInfo.fileName,
+      currentPath: finalPath,
+      fileName: finalFileName,
       originalFileName: fileInfo.fileName,
       title: finalTitle,
       year: movieData.year,
@@ -453,7 +534,7 @@ export class MovieScannerTMDbService {
       isFolder: fileInfo.isFolder,
       lastScanned: new Date().toISOString(),
       status: 'active',
-      errorMessage: renameResult.success ? null : (renameResult.error || null),
+      errorMessage: (renameResult.success || alreadyCorrectName) ? null : (renameResult.error || null),
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -462,13 +543,16 @@ export class MovieScannerTMDbService {
     result.created++;
 
     // Always clean up old metadata files, regardless of rename success
-    const directory = path.dirname(renameResult.success ? renameResult.newPath! : fileInfo.fullPath);
+    const directory = path.dirname(finalPath);
     this.fileRenamer.cleanupOldMetadataFiles(directory, finalTitle, movieData.imdbRating);
 
-    if (renameResult.success) {
+    // Create NFO and poster if rename succeeded OR file already had correct name
+    if (renameResult.success || alreadyCorrectName) {
       // Update currentPaths with renamed path
-      currentPaths.delete(fileInfo.fullPath);
-      currentPaths.add(renameResult.newPath!);
+      if (renameResult.success) {
+        currentPaths.delete(fileInfo.fullPath);
+        currentPaths.add(renameResult.newPath!);
+      }
 
       // Create NFO
       await this.kodiService.createNFOFile(createdMovie, directory);
@@ -510,6 +594,112 @@ export class MovieScannerTMDbService {
     ];
 
     return translitPatterns.some(pattern => pattern.test(text));
+  }
+
+  private async createTVSeriesEntry(fileInfo: MovieFileInfo): Promise<void> {
+    // Generate a meaningful title first
+    // If folder name is generic like "Season 01" or "Сезон 01", use parent folder name
+    let title = fileInfo.fileName;
+    let searchTitle = fileInfo.fileName; // Title to use for TMDB search
+    let parsedYear: number | undefined;
+    const genericSeasonPattern = /^(season|сезон)\s*\d+$/i;
+    const isGenericSeason = genericSeasonPattern.test(fileInfo.fileName);
+    // fileInfo.directory is path.dirname(fullPath), e.g., /mnt/movies/CyberStalker for Season 01 folder
+    const parentFolder = path.basename(fileInfo.directory);
+
+    if (isGenericSeason && parentFolder && parentFolder !== 'movies') {
+      title = `${parentFolder} - ${fileInfo.fileName}`;
+      searchTitle = parentFolder; // Search TMDB using parent folder name, not "Season 01"
+    } else {
+      // For non-generic TV series folders (like torrent-style names), parse and clean
+      const tvParsed = this.tvSeriesParser.parse(fileInfo.fileName);
+      title = tvParsed.cleanName;
+      searchTitle = tvParsed.cleanName;
+      parsedYear = tvParsed.year;
+      console.log(`  TV series parsed: "${fileInfo.fileName}" → "${title}" (year: ${parsedYear}, season: ${tvParsed.season}, translit: ${tvParsed.isTranslit})`);
+    }
+
+    // Check if already exists
+    const existing = this.movieRepo.findByPath(fileInfo.fullPath);
+    if (existing) {
+      // Check if we need to download a poster (missing or wrong one)
+      const posterPath = path.join(fileInfo.directory, `${fileInfo.fileName}-poster.jpg`);
+      const hasPoster = fs.existsSync(posterPath);
+
+      if (!hasPoster && isGenericSeason) {
+        // Need to fetch poster using parent folder name - use TV search endpoint
+        console.log(`  Searching TMDB for TV series poster (update): "${searchTitle}"`);
+        const movieData = await this.tmdbService.searchTV(searchTitle);
+        if (movieData && movieData.posterUrl) {
+          console.log(`  Found poster for "${searchTitle}"`);
+          await this.posterService.downloadAndWatermarkPoster(
+            movieData.posterUrl,
+            posterPath,
+            0 // No IMDB rating for TV series
+          );
+          // Update record with poster URL
+          this.movieRepo.update(existing.id!, {
+            title: title,
+            posterUrl: movieData.posterUrl,
+            lastScanned: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          });
+          return;
+        }
+      }
+
+      // Update existing record with the correct title
+      this.movieRepo.update(existing.id!, {
+        title: title,
+        lastScanned: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+      return;
+    }
+
+    // Try to find poster from TMDB using the series name (not "Season 01") - use TV search endpoint
+    let posterUrl: string | null = null;
+    console.log(`  Searching TMDB for TV series poster: "${searchTitle}"`);
+    const movieData = await this.tmdbService.searchTV(searchTitle);
+    if (movieData && movieData.posterUrl) {
+      posterUrl = movieData.posterUrl;
+      console.log(`  Found poster for "${searchTitle}"`);
+
+      // Download poster with IMDB 0.0 watermark (to indicate TV series)
+      const posterPath = path.join(fileInfo.directory, `${fileInfo.fileName}-poster.jpg`);
+      await this.posterService.downloadAndWatermarkPoster(
+        posterUrl,
+        posterPath,
+        0 // No IMDB rating for TV series
+      );
+    }
+
+    const movie: Omit<Movie, 'id'> = {
+      originalPath: fileInfo.fullPath,
+      currentPath: fileInfo.fullPath,
+      fileName: fileInfo.fileName,
+      originalFileName: fileInfo.fileName,
+      title: title, // Use folder name or parent + folder name for generic season folders
+      year: parsedYear || 0,
+      imdbRating: 0,
+      imdbId: '',
+      country: '',
+      language: '',
+      plot: 'TV Series',
+      genre: 'TV Series',
+      director: null,
+      actors: null,
+      posterUrl: posterUrl,
+      isFolder: true,
+      lastScanned: new Date().toISOString(),
+      status: 'active',
+      errorMessage: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    this.movieRepo.create(movie);
+    console.log(`  ✓ TV Series: ${title}`);
   }
 
   private createErrorMovie(fileInfo: MovieFileInfo, errorMessage: string): void {
@@ -588,71 +778,5 @@ export class MovieScannerTMDbService {
 
   private shouldUseRomanian(country: string): boolean {
     return ROMANIAN_COUNTRIES.some((c) => country.toLowerCase().includes(c.toLowerCase()));
-  }
-
-  /**
-   * Check if two movie titles are a reasonable match
-   * Handles minor variations like "The Baker" vs "Baker, The"
-   * But rejects different movies like "The Baker" vs "Christmas at the Amish Bakery"
-   * or "What If" vs "What If: Aka Laow"
-   */
-  private isTitleMatch(title1: string, title2: string): boolean {
-    const normalize = (t: string) => t
-      .toLowerCase()
-      .replace(/^the\s+/i, '')
-      .replace(/,\s*the$/i, '')
-      .replace(/[^\w\s]/g, '')
-      .trim();
-
-    const n1 = normalize(title1);
-    const n2 = normalize(title2);
-
-    // Exact match after normalization
-    if (n1 === n2) return true;
-
-    // Check if one title is the other with a subtitle (e.g., "Dune" vs "Dune Part One")
-    // Remove common subtitle patterns and compare again
-    const removeSubtitle = (t: string) => t
-      .replace(/\s+part\s+(one|two|three|four|1|2|3|4|i+)$/i, '')
-      .replace(/\s+chapter\s+\d+$/i, '')
-      .replace(/\s+episode\s+\d+$/i, '')
-      .trim();
-
-    const ns1 = removeSubtitle(n1);
-    const ns2 = removeSubtitle(n2);
-
-    if (ns1 === ns2) return true;
-
-    // For short titles (1-2 words), be very strict
-    const words1 = n1.split(/\s+/).filter(w => w.length > 1);
-    const words2 = n2.split(/\s+/).filter(w => w.length > 1);
-
-    if (words1.length <= 2 || words2.length <= 2) {
-      // Only allow short titles to match if:
-      // 1. Exact match (already checked above)
-      // 2. One is a single alphanumeric word that starts the other (e.g., "F9" -> "F9 The Fast Saga")
-
-      // Single-word titles can match if they're the start of a longer title
-      // But multi-word short titles need exact match to prevent "What If" matching "What If: Aka Laow"
-      if (words1.length === 1 && words2.length > 1) {
-        // title1 is single word, check if it's the first word of title2
-        const firstWord2 = words2[0];
-        if (n1 === firstWord2) return true;
-      }
-      if (words2.length === 1 && words1.length > 1) {
-        // title2 is single word, check if it's the first word of title1
-        const firstWord1 = words1[0];
-        if (n2 === firstWord1) return true;
-      }
-
-      // For 2-word titles, require exact match - no fuzzy matching
-      return n1 === n2;
-    }
-
-    // For longer titles (3+ words), check if one is a prefix of the other
-    // This handles cases like "The Baker" vs "The Baker: A Story"
-    if (n1.startsWith(n2) || n2.startsWith(n1)) return true;
-
-    return false;
   }
 }

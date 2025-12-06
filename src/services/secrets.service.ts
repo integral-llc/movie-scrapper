@@ -4,6 +4,7 @@ export interface AppSecrets {
   OPENAI_API_KEY: string;
   TMDB_API_KEY: string;
   OMDB_API_KEY: string;
+  KINOPOISK_API_KEY: string;
   AWS_ACCESS_KEY_ID: string;
   AWS_SECRET_ACCESS_KEY: string;
 }
@@ -59,13 +60,14 @@ class SecretsService {
       OPENAI_API_KEY: process.env.OPENAI_API_KEY || '',
       TMDB_API_KEY: process.env.TMDB_API_KEY || '',
       OMDB_API_KEY: process.env.OMDB_API_KEY || '',
+      KINOPOISK_API_KEY: process.env.KINOPOISK_API_KEY || '',
       AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID || '',
       AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY || '',
     };
 
     // Validate required secrets
     const missing = Object.entries(secrets)
-      .filter(([key, value]) => !value && key !== 'OMDB_API_KEY') // OMDB is optional
+      .filter(([key, value]) => !value && key !== 'OMDB_API_KEY' && key !== 'KINOPOISK_API_KEY') // OMDB and KINOPOISK are optional
       .map(([key]) => key);
 
     if (missing.length > 0) {

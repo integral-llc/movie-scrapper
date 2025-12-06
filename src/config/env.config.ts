@@ -8,6 +8,7 @@ export interface EnvConfig {
   omdbApiKey: string;
   tmdbApiKey: string;
   openaiApiKey: string;
+  kinopoiskApiKey: string;
   awsRegion: string;
   awsAccessKeyId: string;
   awsSecretAccessKey: string;
@@ -44,6 +45,7 @@ export async function initConfig(): Promise<EnvConfig> {
     openaiApiKey: secrets.OPENAI_API_KEY,
     tmdbApiKey: secrets.TMDB_API_KEY,
     omdbApiKey: secrets.OMDB_API_KEY,
+    kinopoiskApiKey: secrets.KINOPOISK_API_KEY || process.env.KINOPOISK_API_KEY || '',
     awsAccessKeyId: secrets.AWS_ACCESS_KEY_ID,
     awsSecretAccessKey: secrets.AWS_SECRET_ACCESS_KEY,
   };

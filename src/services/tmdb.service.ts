@@ -41,6 +41,43 @@ interface TMDbSearchResponse {
   total_results: number;
 }
 
+interface TMDbTVShow {
+  id: number;
+  name: string;
+  original_name: string;
+  first_air_date: string;
+  vote_average: number;
+  vote_count: number;
+  overview: string;
+  poster_path: string | null;
+  backdrop_path: string | null;
+  genre_ids: number[];
+  original_language: string;
+  popularity: number;
+}
+
+interface TMDbTVSearchResponse {
+  results: TMDbTVShow[];
+  total_results: number;
+}
+
+interface TMDbTVDetails {
+  id: number;
+  external_ids?: { imdb_id: string };
+  name: string;
+  original_name: string;
+  first_air_date: string;
+  vote_average: number;
+  overview: string;
+  poster_path: string | null;
+  backdrop_path: string | null;
+  genres: { id: number; name: string }[];
+  origin_country: string[];
+  spoken_languages: { iso_639_1: string; name: string }[];
+  number_of_seasons: number;
+  number_of_episodes: number;
+}
+
 export interface MovieData {
   title: string;
   originalTitle: string;
@@ -266,5 +303,124 @@ export class TMDbService {
   async searchByOriginalTitle(originalTitle: string, year?: number): Promise<MovieData | null> {
     console.log(`  Trying original title search: "${originalTitle}"`);
     return await this.searchMovie(originalTitle, year);
+  }
+
+  async searchTV(title: string): Promise<MovieData | null> {
+    try {
+      console.log(`📺 TMDb TV search: "${title}"`);
+
+      const searchUrl = `${this.baseUrl}/search/tv`;
+      const searchParams = {
+        api_key: this.apiKey,
+        query: title,
+        language: 'en-US',
+        include_adult: false,
+      };
+
+      const searchResponse = await axios.get<TMDbTVSearchResponse>(searchUrl, {
+        params: searchParams,
+        timeout: 10000,
+      });
+
+      const results = searchResponse.data.results || [];
+
+      if (results.length === 0) {
+        console.log(`  ✗ No TV results found`);
+        return null;
+      }
+
+      // Find best match - prefer exact title matches
+      const normalizeTitle = (t: string) => t
+        .toLowerCase()
+        .replace(/^the\s+/i, '')
+        .replace(/,\s*the$/i, '')
+        .replace(/[^\w\s]/g, '')
+        .trim();
+
+      const normalizedSearch = normalizeTitle(title);
+
+      // Score and sort results
+      const scored = results.map((show) => {
+        let score = 0;
+        const n1 = normalizeTitle(show.name);
+        const n2 = normalizeTitle(show.original_name);
+
+        // Exact match bonus
+        if (n1 === normalizedSearch || n2 === normalizedSearch) {
+          score += 2000;
+        } else if (n1.includes(normalizedSearch) || n2.includes(normalizedSearch)) {
+          score += 1000;
+        }
+
+        // English language bonus
+        if (show.original_language === 'en') {
+          score += 500;
+        }
+
+        // Vote count (popularity indicator)
+        score += Math.log10(Math.max(show.vote_count || 1, 1)) * 100;
+        score += show.popularity * 0.5;
+        score += show.vote_average * 5;
+
+        return { show, score };
+      });
+
+      scored.sort((a, b) => b.score - a.score);
+
+      const bestMatch = scored[0]?.show;
+      if (!bestMatch) {
+        console.log(`  ✗ No good TV match found`);
+        return null;
+      }
+
+      console.log(`  ✓ Found TV: "${bestMatch.name}" (${bestMatch.first_air_date?.substring(0, 4)})`);
+
+      // Get full details
+      return await this.getTVDetails(bestMatch.id);
+    } catch (error) {
+      console.error(`  ✗ TMDb TV error:`, error instanceof Error ? error.message : error);
+      return null;
+    }
+  }
+
+  private async getTVDetails(tmdbId: number): Promise<MovieData | null> {
+    try {
+      const detailsUrl = `${this.baseUrl}/tv/${tmdbId}`;
+      const response = await axios.get<TMDbTVDetails>(detailsUrl, {
+        params: {
+          api_key: this.apiKey,
+          language: 'en-US',
+          append_to_response: 'external_ids',
+        },
+        timeout: 10000,
+      });
+
+      const show = response.data;
+      const year = show.first_air_date ? parseInt(show.first_air_date.substring(0, 4)) : 0;
+
+      const movieData: MovieData = {
+        title: show.name,
+        originalTitle: show.original_name,
+        year,
+        imdbRating: Math.round(show.vote_average * 10) / 10,
+        imdbId: show.external_ids?.imdb_id || `tmdb-tv${tmdbId}`,
+        tmdbId: show.id,
+        country: show.origin_country[0] || '',
+        language: show.spoken_languages[0]?.name || '',
+        plot: show.overview || '',
+        genre: show.genres.map((g) => g.name).join(', '),
+        posterUrl: show.poster_path
+          ? `https://image.tmdb.org/t/p/original${show.poster_path}`
+          : '',
+        backdropUrl: show.backdrop_path
+          ? `https://image.tmdb.org/t/p/original${show.backdrop_path}`
+          : '',
+      };
+
+      return movieData;
+    } catch (error) {
+      console.error(`  ✗ Error getting TV details:`, error instanceof Error ? error.message : error);
+      return null;
+    }
   }
 }
